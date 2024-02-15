@@ -1,0 +1,3 @@
+[submodule "src/FaceExpressionWithPyFeat"]
+	path = src/FaceExpressionWithPyFeat
+	url = git@github.com:oishireiyo/FaceExpressionWithPyFeat.git
