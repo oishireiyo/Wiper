@@ -1,0 +1,2 @@
+# Wiper
+Automatic wipe generator.
