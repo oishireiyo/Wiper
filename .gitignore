@@ -162,3 +162,4 @@ cython_debug/
 # User defined
 **/assets/*
 **/deliverables/*
+*.mp4

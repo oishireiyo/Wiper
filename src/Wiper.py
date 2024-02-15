@@ -20,7 +20,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Handmade modules
-sys.path.append(os.path.dirname(os.path.abspath(__file__))) # Need to be updated.
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from FaceExpressionWithPyFeat.src.facial_expression import FacialExpressionAnalysis
 
 class Wiper(object):
@@ -191,7 +191,6 @@ class Wiper(object):
         video_to=wipe_video,
         clipping=(face_sx, face_ex, face_sy, face_ey),
       )
-      break
 
     wipe_video.release()
     logger.info('Done.')
@@ -269,7 +268,7 @@ if __name__ == '__main__':
       '../deliverables/sosina.csv',
     ],
   )
-  # wiper.convert_video_to_dataframe()
+  wiper.convert_video_to_dataframe()
   wiper.set_dataframes()
   wiper.set_criteria(
     criteria=[
