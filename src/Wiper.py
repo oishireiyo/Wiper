@@ -28,11 +28,12 @@ class Wiper(object):
       self,
       video_paths: list[str], # mp4などの動画ファイルのパス
       weights: list[float], # どれだけ対応する動画ファイルを重要視するか
-      interval_in_frame: int=30, # 表情検出、角度検出などを何フレームおきに実行するか
+      interval_in_frame: int=30, # 表情検出、角度検出などを何フレームおきに実行するか、秒じゃないよ
       csv_paths: Union[list[str], None]=None, # 前回結果を保存したCSVファイルがある場合は指定して時短
       criteria: Union[list[tuple[str, str]], None]=None, # どのような条件でワイプ動画を選定するか
-      output_video_name: str='output.mp4',
-      output_video_size: tuple[int, int]=(400, 400),
+      scheduled_in_frames: list[list[tuple[int, int]]]=None, # 前もって決定されているワイプ
+      output_video_name: str='output.mp4', # 出力ビデオの名前
+      output_video_size: tuple[int, int]=(400, 400), # 出力ビデオのサイズ in フレームサイズ
   ) -> None:
     self.video_paths = video_paths
     self.weights = weights
@@ -40,10 +41,12 @@ class Wiper(object):
     self.csv_paths = [] if csv_paths is None else csv_paths
     self.dataframes = []
     self.criteria = criteria
+    self.scheduled_in_frames = scheduled_in_frames
     self.output_video_name = output_video_name
     self.output_video_size = output_video_size
 
   def convert_videos_to_dataframe(self) -> None:
+    # 動画ファイルをpandas.DataFrameに変換する
     for video_path in self.video_paths:
       parser = FacialExpressionAnalysis()
       parser.set_detector()
@@ -59,55 +62,88 @@ class Wiper(object):
       self.csv_paths.append(csv_path)
 
   def get_dataframe(self, csv_path: str) -> pd.DataFrame:
+    # データフレームをCSVファイルから取得
     parser = FacialExpressionAnalysis()
     return parser.read_results(csvfile=csv_path)
 
   def set_dataframes(self) -> None:
+    # データフレームを属性値に
     for csv_path in self.csv_paths:
       dataframe = self.get_dataframe(csv_path=csv_path)
       self.dataframes.append(dataframe)
 
   def set_criteria(self, criteria: list[tuple[str, str]]) -> None:
+    # 条件を設定
     self.criteria = criteria
 
+  def set_scheduled_in_frames(self, scheduled_in_frames: list[list[tuple[int, int]]]) -> None:
+    # 前もって決定されているワイプの設定
+    '''
+    入力のscheduleは以下の形式を想定
+    scheduled_in_frames = [
+      [(), ()], # 1つ目のビデオに対するワイプ
+      [(), ()], # 2つ目のビデオに対するワイプ
+      ...
+    ]
+    '''
+    self.scheduled_in_frames = scheduled_in_frames
+
   def get_criteria_str(self) -> str:
-    # 入力のcriteriaは以下の形式を想定
-    #   criteria = [
-    #     ('happiness', '> 0.9'),
-    #     ('Pitch', '< 15.0'),
-    #   ]
+    '''
+    入力のcriteriaは以下の形式を想定
+      criteria = [
+        ('happiness', '> 0.9'),
+        ('Pitch', '< 15.0'),
+        ('Pitch', '> -15.0'),
+      ]
+    '''
     criteria_str =' and '.join([f'{criterion[0]} {criterion[1]}' for criterion in self.criteria])
     return criteria_str
 
+  def get_scheduled_in_record_id(self) -> None:
+    # 前もって決定されているワイプの取得
+    scheduled_in_record_id = []
+    for scheduled_in_frames in self.scheduled_in_frames:
+      scheduled_in_record_id.append([(int(from_frame / self.interval_in_frame), int(to_frame / self.interval_in_frame)) for (from_frame, to_frame) in scheduled_in_frames])
+    return scheduled_in_record_id
+
   def get_fulfil_records(self, df: pd.DataFrame) -> pd.DataFrame:
+    # 条件に合うレコードを取得
     criteria = self.get_criteria_str()
     return df.query(criteria)
 
   def add_columns_with_criteria(self, df: pd.DataFrame, column_name: str, true_val: Any, false_val: Any):
+    # 新しいカラムを追加(criteriaを満たす -> true_val, 満たさない -> false_val)
     df[column_name] = True
     for criterion in self.criteria:
       df[column_name] = [true_val if eval(f'{x} {criterion[1]} and {y}') else false_val for x, y in zip(df[criterion[0]], df[column_name])]
 
   def add_boolean_columns_with_criteria(self, df: pd.DataFrame, column_name: str):
+    # 新しいカラムを追加(criteriaを満たす -> True, 満たさない -> False)
     self.add_columns_with_criteria(df=df, column_name=column_name, true_val=True, false_val=False)
 
   def add_bit_columns_with_criteria(self, df: pd.DataFrame, column_name: str):
+    # 新しいカラムを追加(criteriaを満たす -> 1, 満たさない -> 0)
     self.add_columns_with_criteria(df=df, column_name=column_name, true_val=1, false_val=0)
 
   def add_float_columns_with_criteria(self, df: pd.DataFrame, column_name: str, true_val: float, false_val: float):
+    # 新しいカラムを追加(criteriaを満たす -> true_val: float, 満たさない -> falce_val: float)
     self.add_columns_with_criteria(df=df, column_name=column_name, true_val=true_val, false_val=false_val)
 
   def add_columns_with_moving_sum(self, df: pd.DataFrame, window_size: int, column: str):
+    # window_sizeの移動和を取る
     df[f'{column}_move_sum_{window_size}'] = df[column].rolling(window=window_size, min_periods=1).sum().shift(-window_size+1)
     df[f'{column}_move_sum_{window_size}'] = df[f'{column}_move_sum_{window_size}'].fillna(0)
 
   def add_columns_with_moving_mean(self, df: pd.DataFrame, window_size: int, column: str):
+    # window_sizeの移動平均を取る
     df[f'{column}_move_mean_{window_size}'] = df[column].rolling(window=window_size, min_periods=1).mean().shift(-window_size+1)
     df[f'{column}_move_mean_{window_size}'] = df[f'{column}_move_mean_{window_size}'].fillna(0)
 
   def make_wipe(self, window_size: int=10):
+    # ワイプの作成
     column = 'fulfil'
-    for df, video_path, weight in zip(self.dataframes, self.video_paths, self.weights):
+    for df, video_path, weight, schedules in zip(self.dataframes, self.video_paths, self.weights, self.get_scheduled_in_record_id()):
       # はじめにどのレコードが条件を満たすかをbit値で表現する
       self.add_float_columns_with_criteria(df=df, column_name=column, true_val=weight, false_val=0.0)
 
@@ -118,6 +154,11 @@ class Wiper(object):
       df[video_path] = df[f'{column}_move_sum_{window_size}']
       for facecolumn in ['FaceRectX', 'FaceRectY', 'FaceRectWidth', 'FaceRectHeight']:
         df[f'{video_path}_{facecolumn}'] = df[facecolumn]
+
+      # 前もってワイプに設定されているフレームに関する操作
+      for (from_frame, to_frame) in schedules:
+        if from_frame <= to_frame-1:
+          df.loc[from_frame:to_frame-1, video_path] = 1e5
 
     # データフレームの結合
     for i_df in range(len(self.dataframes)):
@@ -156,6 +197,8 @@ class Wiper(object):
             on='frame',
           )
 
+    merged_df.to_csv('merged_df.csv')
+
     # wipe作成に必要なデータフレーム
     def condition_based_value(row, facecolumn):
       video_name_from = row['video_name_from']
@@ -168,13 +211,12 @@ class Wiper(object):
     for facecolumn in ['FaceRectX', 'FaceRectY', 'FaceRectWidth', 'FaceRectHeight']:
       wipe_df[facecolumn] = merged_df.apply(condition_based_value, args=(facecolumn, ), axis=1)
 
-    # ビデオを出力
+    # 出力ビデオの設定
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    fps = self.interval_in_frame
-    wipe_video = cv2.VideoWriter(self.output_video_name, fourcc, fps, self.output_video_size)
+    wipe_video = cv2.VideoWriter(self.output_video_name, fourcc, self.interval_in_frame, self.output_video_size)
     video_w, video_h = self.output_video_size
 
-    for index, row, face_x, face_y, face_w, face_h in zip(
+    for frame, video_name_from, face_x, face_y, face_w, face_h in zip(
       wipe_df['frame'], wipe_df['video_name_from'],
       wipe_df['FaceRectX'], wipe_df['FaceRectY'], wipe_df['FaceRectWidth'], wipe_df['FaceRectHeight']
     ):
@@ -185,9 +227,9 @@ class Wiper(object):
       face_sy = int(face_cy - video_h/2)
       face_ey = face_sy + video_h
       self.get_interval_frames_cutoff(
-        video_name_from=row,
-        from_frame=int(index),
-        to_frame=int(index+fps),
+        video_name_from=video_name_from,
+        from_frame=int(frame),
+        to_frame=int(frame+self.interval_in_frame),
         video_to=wipe_video,
         clipping=(face_sx, face_ex, face_sy, face_ey),
       )
@@ -196,6 +238,7 @@ class Wiper(object):
     logger.info('Done.')
 
   def get_interval_frames(self, video_name_from: str, from_frame: int, to_frame: int, video_to) -> None:
+    # from_frameからto_frameのフレームを取得
     logger.info(f'Frame No.{from_frame} ~ {to_frame-1} from {video_name_from}')
     video_from = cv2.VideoCapture(video_name_from)
     for iframe in range(from_frame, to_frame, 1):
@@ -207,6 +250,7 @@ class Wiper(object):
     video_from.release()
 
   def get_interval_frames_cutoff(self, video_name_from: str, from_frame: int, to_frame: int, video_to, clipping: tuple[int, int, int, int]) -> None:
+    # from_frameからto_frameのフレームを整形し取得
     logger.info(f'Frame No.{from_frame} - {to_frame-1} from {video_name_from}')
     video_from = cv2.VideoCapture(video_name_from)
     (face_sx, face_ex, face_sy, face_ey) = clipping
@@ -251,7 +295,6 @@ if __name__ == '__main__':
     video_paths = [
       '../assets/nico.mp4',
       '../assets/onna.mp4',
-      '../assets/otoko.mp4',
       '../assets/sosina.mp4',
     ],
     weights = [
@@ -264,11 +307,10 @@ if __name__ == '__main__':
     csv_paths = [
       '../deliverables/nico.csv',
       '../deliverables/onna.csv',
-      '../deliverables/otoko.csv',
       '../deliverables/sosina.csv',
     ],
   )
-  wiper.convert_video_to_dataframe()
+  # wiper.convert_video_to_dataframe()
   wiper.set_dataframes()
   wiper.set_criteria(
     criteria=[
@@ -283,6 +325,13 @@ if __name__ == '__main__':
       ('Roll', '> -30.0'),
       ('Yaw', '< 30.0'),
       ('Yaw', '> -30.0'),
+    ]
+  )
+  wiper.set_scheduled_in_frames(
+    scheduled_in_frames=[
+      [(900, 1500)],
+      [],
+      [(300, 900)],
     ]
   )
   wiper.make_wipe(window_size=10)
