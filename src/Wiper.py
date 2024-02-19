@@ -16,12 +16,18 @@ logger.addHandler(stream_handler)
 
 # Advanced modules
 import cv2
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
 # Handmade modules
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 from FaceExpressionWithPyFeat.src.facial_expression import FacialExpressionAnalysis
+
+def clip(image_name: str, top: int, bottom: int, left: int, right: int):
+  image = cv2.imread(image_name)
+  image = image[top:bottom, left:right]
+  cv2.imwrite('output.png', image)
 
 class Wiper(object):
   def __init__(
@@ -31,9 +37,9 @@ class Wiper(object):
       interval_in_frame: int=30, # 表情検出、角度検出などを何フレームおきに実行するか、秒じゃないよ
       csv_paths: Union[list[str], None]=None, # 前回結果を保存したCSVファイルがある場合は指定して時短
       criteria: Union[list[tuple[str, str]], None]=None, # どのような条件でワイプ動画を選定するか
-      scheduled_in_frames: list[list[tuple[int, int]]]=None, # 前もって決定されているワイプ
+      scheduled_in_frames: list[list[tuple[int, int]]]=None, # 前もって決定されているワイプ(喋っているの場所など)
       output_video_name: str='output.mp4', # 出力ビデオの名前
-      output_video_size: tuple[int, int]=(400, 400), # 出力ビデオのサイズ in フレームサイズ
+      output_video_size: tuple[int, int]=(800, 800), # 出力ビデオのサイズ in フレームサイズ
   ) -> None:
     self.video_paths = video_paths
     self.weights = weights
@@ -158,7 +164,7 @@ class Wiper(object):
       # 前もってワイプに設定されているフレームに関する操作
       for (from_frame, to_frame) in schedules:
         if from_frame <= to_frame-1:
-          df.loc[from_frame:to_frame-1, video_path] = 1e5
+          df.loc[from_frame:to_frame-1, video_path] = self.interval_in_frame * max(self.weights) * 2
 
     # データフレームの結合
     for i_df in range(len(self.dataframes)):
@@ -181,6 +187,7 @@ class Wiper(object):
             f'{self.video_paths[i_df+1]}_FaceRectHeight',
           ]],
           on='frame',
+          how='outer',
         )
       else:
         if i_df < len(self.dataframes)-1:
@@ -195,6 +202,7 @@ class Wiper(object):
               f'{self.video_paths[i_df+1]}_FaceRectHeight',
             ]],
             on='frame',
+            how='outer',
           )
 
     merged_df.to_csv('merged_df.csv')
@@ -214,25 +222,35 @@ class Wiper(object):
     # 出力ビデオの設定
     fourcc = cv2.VideoWriter_fourcc(*'mp4v')
     wipe_video = cv2.VideoWriter(self.output_video_name, fourcc, self.interval_in_frame, self.output_video_size)
-    video_w, video_h = self.output_video_size
+    video_width, video_height = self.output_video_size
 
-    for frame, video_name_from, face_x, face_y, face_w, face_h in zip(
+    recorded_latest_frame_no = -1
+    for frame, video_name_from, left, top, width, height in zip(
       wipe_df['frame'], wipe_df['video_name_from'],
       wipe_df['FaceRectX'], wipe_df['FaceRectY'], wipe_df['FaceRectWidth'], wipe_df['FaceRectHeight']
     ):
-      face_cx = face_x + face_w/2
-      face_cy = face_y + face_h/2
-      face_sx = int(face_cx - video_w/2)
-      face_ex = face_sx + video_w
-      face_sy = int(face_cy - video_h/2)
-      face_ey = face_sy + video_h
-      self.get_interval_frames_cutoff(
-        video_name_from=video_name_from,
-        from_frame=int(frame),
-        to_frame=int(frame+self.interval_in_frame),
-        video_to=wipe_video,
-        clipping=(face_sx, face_ex, face_sy, face_ey),
-      )
+      if frame <= recorded_latest_frame_no:
+        continue
+      elif frame == recorded_latest_frame_no + 1:
+        face_left   = int(left + width/2  - video_width/2)
+        face_right  = face_left + video_width
+        face_top    = int(top  + height/2 - video_height/2)
+        face_bottom = face_top + video_height
+
+        self.get_interval_frames_cutoff(
+          video_name_from=video_name_from,
+          from_frame=int(frame),
+          to_frame=int(frame+self.interval_in_frame),
+          video_to=wipe_video,
+          clipping=(face_top, face_bottom, face_left, face_right),
+        )
+      else:
+        logger.info(f'{self.interval_in_frame} black frames are inserted.')
+        for _ in range(self.interval_in_frame):
+          black = np.zeros((video_width, video_height, 3), dtype = np.uint8)
+          wipe_video.write(black)
+
+      recorded_latest_frame_no = frame+self.interval_in_frame-1
 
     wipe_video.release()
     logger.info('Done.')
@@ -245,6 +263,7 @@ class Wiper(object):
       video_from.set(cv2.CAP_PROP_POS_FRAMES, iframe)
       ret, frame = video_from.read()
       if ret:
+        # clipping -> image[top:bottom, left:right]
         _frame = cv2.resize(frame, self.output_video_size)
         video_to.write(_frame)
     video_from.release()
@@ -253,12 +272,13 @@ class Wiper(object):
     # from_frameからto_frameのフレームを整形し取得
     logger.info(f'Frame No.{from_frame} - {to_frame-1} from {video_name_from}')
     video_from = cv2.VideoCapture(video_name_from)
-    (face_sx, face_ex, face_sy, face_ey) = clipping
+    (top, bottom, left, right) = clipping
     for iframe in range(from_frame, to_frame, 1):
       video_from.set(cv2.CAP_PROP_POS_FRAMES, iframe)
       ret, frame = video_from.read()
       if ret:
-        _frame = frame[max(0, face_sy):min(frame.shape[1], face_ey), max(0, face_sx):min(frame.shape[0], face_ex)]
+        # clipping -> image[top:bottom, left:right]
+        _frame = frame[max(0, top):min(frame.shape[0], bottom), max(0, left):min(frame.shape[1], right)]
         _frame = cv2.resize(_frame, self.output_video_size)
         video_to.write(_frame)
     video_from.release()
@@ -293,45 +313,45 @@ class Wiper(object):
 if __name__ == '__main__':
   wiper = Wiper(
     video_paths = [
-      '../assets/nico.mp4',
-      '../assets/onna.mp4',
-      '../assets/sosina.mp4',
+      '../assets/BlackNerdComedy_CapCut.mp4',
+      '../assets/DeanBarry_CapCut.mp4',
+      '../assets/funnylilgalreacts_CapCut.mp4',
     ],
     weights = [
-      20.0,
-      2.0,
       1.0,
-      0.5,
+      2.0,
+      1.5,
     ],
     interval_in_frame=30,
     csv_paths = [
-      '../deliverables/nico.csv',
-      '../deliverables/onna.csv',
-      '../deliverables/sosina.csv',
+      '../deliverables/BlackNerdComedy_CapCut.csv',
+      '../deliverables/DeanBarry_CapCut.csv',
+      '../deliverables/funnylilgalreacts_CapCut.csv',
     ],
+    output_video_name='pool.mp4',
   )
-  # wiper.convert_video_to_dataframe()
+  # wiper.convert_videos_to_dataframe()
   wiper.set_dataframes()
   wiper.set_criteria(
     criteria=[
-      ('happiness', '> 0.60'),
-      ('anger', '< 0.20'),
-      ('disgust', '< 0.20'),
-      ('fear', '< 0.20'),
-      ('sadness', '< 0.20'),
-      ('Pitch', '< 30.0'),
-      ('Pitch', '> -30.0'),
-      ('Roll', '< 30.0'),
-      ('Roll', '> -30.0'),
-      ('Yaw', '< 30.0'),
-      ('Yaw', '> -30.0'),
+      #('happiness', '> 0.60'),
+      #('anger', '< 0.20'),
+      #('disgust', '< 0.20'),
+      #('fear', '< 0.20'),
+      #('sadness', '< 0.20'),
+      ('Pitch', '< 60.0'),
+      ('Pitch', '> -60.0'),
+      ('Roll', '< 60.0'),
+      ('Roll', '> -60.0'),
+      ('Yaw', '< 60.0'),
+      ('Yaw', '> -60.0'),
     ]
   )
   wiper.set_scheduled_in_frames(
     scheduled_in_frames=[
-      [(900, 1500)],
-      [],
-      [(300, 900)],
+      [(300, 390), (870, 930)],
+      [(0, 150), (450, 510)],
+      [((660, 720))],
     ]
   )
   wiper.make_wipe(window_size=10)
